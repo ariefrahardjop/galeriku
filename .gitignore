@@ -1,0 +1,7 @@
+# Galeriku — jangan commit hasil build & kunci
+build/
+*.apk
+*.idsig
+*.keystore
+*.log
+.DS_Store

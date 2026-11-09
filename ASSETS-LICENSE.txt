@@ -1,0 +1,8 @@
+Font Awesome Free 6.5.2 — assets/fonts/fa-solid-900.ttf
+Sumber: https://github.com/FortAwesome/Font-Awesome/releases/tag/6.5.2
+  (paket fontawesome-free-6.5.2-web.zip, file webfonts/fa-solid-900.ttf)
+Lisensi: SIL Open Font License 1.1 (OFL) — gratis dipakai dan didistribusikan,
+termasuk di dalam aplikasi komersial, selama file font tidak dijual terpisah.
+Hanya file font Solid (fa-solid-900.ttf) yang dibundel; font tidak diubah.
+Ikon yang dipakai di Galeriku: chevron-left, search, ellipsis-vertical, pencil,
+info, share-nodes, image, folder, globe, xmark, copy, stamp, clock.
