@@ -14,7 +14,7 @@ rm -rf build
 mkdir -p build/classes build/dex
 
 # 1. Paket manifest + assets (font Font Awesome) -> APK belum bertanda
-"$BT/aapt" package -f -M AndroidManifest.xml -I "$PLATFORM" -A assets -F build/unsigned.apk
+"$BT/aapt" package -f -M AndroidManifest.xml -S res -I "$PLATFORM" -A assets -F build/unsigned.apk
 
 # 2. Kompilasi Java
 "$JDK/javac" -encoding UTF-8 -source 8 -target 8 -cp "$PLATFORM" \
