@@ -26,6 +26,10 @@
 //   Galeriku.pickFile) supaya NIK yang sudah diproses di sana ikut di-skip.
 // - Skrip TIDAK jalan otomatis saat halaman dibuka; tekan "Mulai" di panel.
 //   Tombol "Berhenti" menghentikan di antara NIK (bukan di tengah baris).
+// - Mode melayang (v1.37 aplikasi): skrip melaporkan progres tiap NIK dan
+//   saat selesai/dihentikan lewat Galeriku.reportProgress() (no-op bila
+//   mode melayang tidak aktif); tombol Berhenti di panel melayang/notifikasi
+//   menyetel window.__siksStopRequested yang diperiksa di antara NIK.
 (function () {
   'use strict';
 
@@ -60,8 +64,22 @@
     if (window.console && console.log) console.log('[SIKS] ' + msg);
   }
 
-  function setStatus(msg) { statusLine.textContent = msg; }
-  function setProgress(msg) { progressLine.textContent = msg; }
+  function setStatus(msg) { statusLine.textContent = msg; if (msg) reportFloat(msg); }
+  function setProgress(msg) { progressLine.textContent = msg; if (msg) reportFloat(msg); }
+
+  // v1.37 (mode melayang): laporkan progres ke panel melayang + notifikasi
+  // aplikasi. No-op bila bridge tidak ada / mode melayang tidak aktif.
+  function reportFloat(msg) {
+    try {
+      if (window.Galeriku && Galeriku.reportProgress) Galeriku.reportProgress(msg);
+    } catch (e) {}
+  }
+  // Flag berhenti gabungan: tombol Berhenti di panel skrip (stopRequested)
+  // ATAU tombol Berhenti di panel melayang/notifikasi (disetel aplikasi
+  // lewat window.__siksStopRequested).
+  function stopRequestedNow() {
+    return stopRequested || window.__siksStopRequested === true;
+  }
 
   function buildPanel() {
     panel = document.createElement('div');
@@ -198,6 +216,33 @@
   function topDialog() {
     var dialogs = document.querySelectorAll('.MuiDialog-root');
     return dialogs.length ? dialogs[dialogs.length - 1] : null;
+  }
+
+  // v1.37 (perbaikan hover): tiru hover mouse sebelum klik.
+  // Di Playwright, click() menggerakkan mouse sungguhan ke elemen
+  // (mouseover/mouseenter + :hover aktif) sebelum klik; di userscript,
+  // el.click() adalah klik sintetis tanpa gerakan mouse — elemen yang
+  // hanya muncul/aktif saat hover (mis. span NIK di cell modal) tidak
+  // terungkap sebelum diklik. Helper ini men-dispatch mousemove /
+  // mouseover / mouseenter ke elemen (dengan koordinat dari
+  // getBoundingClientRect) supaya listener JS yang menunggu hover jalan.
+  // CATATAN JUJUR: event sintetis memicu listener JS (mouseover /
+  // mouseenter), tapi TIDAK memicu CSS :hover — itu hanya merespons
+  // posisi mouse sungguhan. Bila unmask di halaman ini ternyata
+  // digerakkan CSS :hover (bukan listener JS), hover sintetis tidak
+  // cukup dan NIK tetap tidak ter-unmask; satu-satunya jalan saat itu
+  // adalah gerakan mouse sungguhan (tidak bisa dari userscript).
+  function hoverEl(el) {
+    if (!el) return;
+    try {
+      var r = el.getBoundingClientRect();
+      var x = r.left + r.width / 2;
+      var y = r.top + r.height / 2;
+      var opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+      el.dispatchEvent(new MouseEvent('mousemove', opts));
+      el.dispatchEvent(new MouseEvent('mouseover', opts));
+      el.dispatchEvent(new MouseEvent('mouseenter', opts));
+    } catch (e) {}
   }
 
   // ====== PROGRES (localStorage, pengganti file CSV progres) ======
@@ -342,7 +387,7 @@
       var maxPages = 50;
 
       function step() {
-        if (stopRequested) return resolve(allNikData);
+        if (stopRequestedNow()) return resolve(allNikData);
         if (pageNum > maxPages) return resolve(allNikData);
 
         log('Halaman ' + pageNum + '...');
@@ -446,7 +491,7 @@
         var chain = Promise.resolve();
         rows.forEach(function (row, i) {
           chain = chain.then(function () {
-            if (stopRequested) return;
+            if (stopRequestedNow()) return;
             return scrapeModalRow(row, i, rowData, out);
           });
         });
@@ -464,6 +509,14 @@
       if (cells.length < 7) return resolve();
       row.scrollIntoView({ block: 'center' });
       delay(300).then(function () {
+        // v1.37: hover dulu (baris -> cell NIK -> span), baru klik — meniru
+        // gerakan mouse Playwright sebelum click() (lihat hoverEl).
+        var nikSpan = cells[0].querySelector('span');
+        hoverEl(row);
+        hoverEl(cells[0]);
+        hoverEl(nikSpan);
+        return delay(300);
+      }).then(function () {
         var nikSpan = cells[0].querySelector('span');
         if (nikSpan) nikSpan.click();
         return delay(300);
@@ -490,8 +543,15 @@
         log('Komponen Sekolah - membuka detail UP...');
         var upButton = cells[3].querySelector('button');
         if (!upButton) { out.push(item); return resolve(); }
-        upButton.click();
-        delay(1500).then(function () {
+        // v1.37: hover dulu (baris -> cell -> tombol), baru klik — pola
+        // hover-reveal yang sama seperti span NIK di atas.
+        hoverEl(row);
+        hoverEl(cells[3]);
+        hoverEl(upButton);
+        delay(300).then(function () {
+          upButton.click();
+          return delay(1500);
+        }).then(function () {
           return scrapeDataSekolah();
         }).then(function (dataSekolah) {
           item.namaSekolah = dataSekolah.namaSekolah;
@@ -558,6 +618,9 @@
     if (running) { setStatus('Scrape sedang berjalan.'); return; }
     running = true;
     stopRequested = false;
+    // v1.37: reset juga flag berhenti dari panel melayang supaya run baru
+    // tidak langsung berhenti (flag disetel aplikasi saat Berhenti ditekan).
+    window.__siksStopRequested = false;
     btnMulai.disabled = true;
     btnBerhenti.disabled = false;
     setStatus('Memulai scraping...');
@@ -582,17 +645,17 @@
       var chain = Promise.resolve();
       pendingNikData.forEach(function (nikData, idx) {
         chain = chain.then(function () {
-          if (stopRequested) return;
+          if (stopRequestedNow()) return;
           return processOneNik(nikData, idx + 1, pendingNikData.length);
         });
       });
       return chain.then(function () { return { allNikData: allNikData }; });
     }).then(function (ctx) {
-      if (stopRequested) {
+      if (stopRequestedNow()) {
         setStatus('Dihentikan. Progres tersimpan — tekan Mulai untuk lanjut.');
         log('Dihentikan oleh pengguna. Progres tersimpan.');
       } else {
-        setStatus('Scraping selesai: ' + results.length + ' baris.');
+        setStatus('Selesai: ' + results.length + ' baris.');
         log('SCRAPING SELESAI — total ' + results.length + ' baris, ' +
           ctx.allNikData.length + ' NIK diproses.');
       }
@@ -601,6 +664,9 @@
     }).catch(function (e) {
       setStatus('ERROR: ' + e.message);
       log('ERROR: ' + e.message);
+      // v1.37: run berakhir karena error — laporkan sebagai "Dihentikan"
+      // supaya panel melayang menutup sendiri (auto-stop service).
+      reportFloat('Dihentikan: ' + e.message);
       showCsv();
       saveProgress();
     }).then(function () {
