@@ -516,9 +516,50 @@
     return rs[idx] || null;
   }
 
+  // v1.37d: klik seperti mouse sungguhan — Playwright menembakkan
+  // pointerdown/mousedown/pointerup/mouseup/click berurutan; el.click()
+  // saja hanya menembakkan click. Beberapa handler (MUI/React) menunggu
+  // mousedown/pointerdown.
+  function clickEl(el) {
+    if (!el) return;
+    try {
+      var r = el.getBoundingClientRect();
+      var opts = { bubbles: true, cancelable: true,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        button: 0, buttons: 1 };
+      try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e0) {}
+      try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e1) {}
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e2) {}
+      el.dispatchEvent(new MouseEvent('mouseup', opts));
+      el.click();
+    } catch (e) {}
+  }
+
+  // v1.37d: scroll MINIMAL seperti scrollIntoViewIfNeeded Playwright —
+  // hanya bila baris belum terlihat penuh, dan seminimal mungkin
+  // (block:'nearest', behavior:'instant'). scrollIntoView block:'center'
+  // menggeser isi modal di SETIAP baris; tiap geseran bisa memicu
+  // event mouse sungguhan dari browser (konten lewat di bawah titik
+  // sentuh terakhir) yang mengacaukan hover React — dan itu hanya
+  // terjadi bila modal harus di-scroll, alias baris 3+.
+  function scrollRowIntoViewIfNeeded(row) {
+    try {
+      var dlg = row.closest('.MuiDialogContent-root');
+      var container = dlg || document.documentElement;
+      var r = row.getBoundingClientRect();
+      var c = container.getBoundingClientRect();
+      if (r.top >= c.top && r.bottom <= c.bottom) return;
+      row.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    } catch (e) {
+      try { row.scrollIntoView({ block: 'nearest' }); } catch (e2) {}
+    }
+  }
+
   // v1.37c: hover + klik NIK dalam SATU blok sinkron (atomik). Jeda di
   // antara hover dan klik memberi React kesempatan me-render ulang —
   // span yang di-hover belum tentu span yang diklik.
+  // v1.37d: klik lewat clickEl (urutan pointer/mouse lengkap).
   function hoverAndClickNik(idx) {
     var freshRow = modalRowAt(idx);
     if (!freshRow) return false;
@@ -528,7 +569,7 @@
     hoverEl(freshRow);
     hoverEl(freshCells[0]);
     hoverEl(nikSpan);
-    if (nikSpan) nikSpan.click();
+    clickEl(nikSpan);
     return true;
   }
 
@@ -542,7 +583,7 @@
     hoverEl(freshRow);
     hoverEl(freshCells[3]);
     hoverEl(upButton);
-    upButton.click();
+    clickEl(upButton);
     return true;
   }
 
@@ -601,7 +642,7 @@
       var row = modalRowAt(idx);
       if (!row) return resolve();
       if (row.querySelectorAll('td, th').length < 7) return resolve();
-      row.scrollIntoView({ block: 'center' });
+      scrollRowIntoViewIfNeeded(row);
       delay(300).then(function () {
         // v1.37c: hover + klik ATOMIK, lalu VERIFIKASI dengan polling:
         // baca ulang cell sampai NIK ter-unmask (16 digit, tanpa '*')
@@ -826,7 +867,7 @@
 
   // ====== INIT ======
   buildPanel();
-  log('SIKS Filter NIK v1.37c — hover+klik atomik, verifikasi unmask + retry');
+  log('SIKS Filter NIK v1.37d — scroll minimal, klik pointer/mouse lengkap');
   loadProgress();
   if (Object.keys(processedNik).length > 0) {
     setStatus('Siap. ' + Object.keys(processedNik).length +
