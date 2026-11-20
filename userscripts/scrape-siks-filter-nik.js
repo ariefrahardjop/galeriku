@@ -232,16 +232,36 @@
   // digerakkan CSS :hover (bukan listener JS), hover sintetis tidak
   // cukup dan NIK tetap tidak ter-unmask; satu-satunya jalan saat itu
   // adalah gerakan mouse sungguhan (tidak bisa dari userscript).
+  // v1.37c: tiru gerakan mouse sungguhan sedekat mungkin. Playwright
+  // menggerakkan mouse beneran: mouseout di elemen lama (relatedTarget =
+  // elemen baru) lalu mouseover di elemen baru (relatedTarget = elemen
+  // lama). Tanpa relatedTarget, React tidak bisa menghitung jalur
+  // leave/enter dengan benar — hover baris 2 tidak pernah "tiba" di
+  // React. Event tetap sintetis (tidak memicu CSS :hover), tapi untuk
+  // listener JS React ini sedekat mungkin dengan mouse sungguhan.
+  var lastHoverEl = null;
   function hoverEl(el) {
     if (!el) return;
     try {
       var r = el.getBoundingClientRect();
       var x = r.left + r.width / 2;
       var y = r.top + r.height / 2;
-      var opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+      if (lastHoverEl && lastHoverEl !== el) {
+        try {
+          var ro = lastHoverEl.getBoundingClientRect();
+          var oo = { bubbles: true, cancelable: true,
+            clientX: ro.left + ro.width / 2, clientY: ro.top + ro.height / 2,
+            relatedTarget: el };
+          lastHoverEl.dispatchEvent(new MouseEvent('mouseout', oo));
+          lastHoverEl.dispatchEvent(new MouseEvent('mouseleave', oo));
+        } catch (e2) {}
+      }
+      var opts = { bubbles: true, cancelable: true, clientX: x, clientY: y,
+        relatedTarget: lastHoverEl };
       el.dispatchEvent(new MouseEvent('mousemove', opts));
       el.dispatchEvent(new MouseEvent('mouseover', opts));
       el.dispatchEvent(new MouseEvent('mouseenter', opts));
+      lastHoverEl = el;
     } catch (e) {}
   }
 
@@ -483,26 +503,69 @@
   // dan klik sesudahnya mengenai salinan lama yang tidak ada di layar,
   // dan innerText yang dibaca tetap yang lama (NIK tetap termasking).
   // Karena itu tiap baris diambil FRESH dari DOM berdasarkan indeksnya,
-  // dan cell/span dibaca ulang tepat sebelum dipakai. Sebelum hover
-  // baris baru, hover baris lama dilepas dulu (mouseout) supaya
-  // pelacakan hover React tidak mengira mouse masih di baris lama.
-  var lastHoverEl = null;
-  function unhoverLast() {
-    if (!lastHoverEl) return;
-    try {
-      var r = lastHoverEl.getBoundingClientRect();
-      var opts = { bubbles: true, cancelable: true,
-        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
-      lastHoverEl.dispatchEvent(new MouseEvent('mouseout', opts));
-      lastHoverEl.dispatchEvent(new MouseEvent('mouseleave', opts));
-    } catch (e) {}
-    lastHoverEl = null;
-  }
+  // dan cell/span dibaca ulang tepat sebelum dipakai.
+  // v1.37c: hover + klik harus ATOMIK (satu blok sinkron, tanpa delay
+  // di antaranya) — jeda 300ms di antara hover dan klik memberi React
+  // kesempatan me-render ulang, sehingga span yang di-hover belum tentu
+  // span yang diklik. Mouseout baris lama kini ditangani di dalam
+  // hoverEl (relatedTarget), bukan sebagai langkah terpisah.
   function modalRowAt(idx) {
     var tb = document.querySelector('.MuiDialogContent-root table tbody');
     if (!tb) return null;
     var rs = tb.querySelectorAll('tr');
     return rs[idx] || null;
+  }
+
+  // v1.37c: hover + klik NIK dalam SATU blok sinkron (atomik). Jeda di
+  // antara hover dan klik memberi React kesempatan me-render ulang —
+  // span yang di-hover belum tentu span yang diklik.
+  function hoverAndClickNik(idx) {
+    var freshRow = modalRowAt(idx);
+    if (!freshRow) return false;
+    var freshCells = freshRow.querySelectorAll('td, th');
+    if (freshCells.length < 7) return false;
+    var nikSpan = freshCells[0].querySelector('span');
+    hoverEl(freshRow);
+    hoverEl(freshCells[0]);
+    hoverEl(nikSpan);
+    if (nikSpan) nikSpan.click();
+    return true;
+  }
+
+  function hoverAndClickUp(idx) {
+    var freshRow = modalRowAt(idx);
+    if (!freshRow) return false;
+    var freshCells = freshRow.querySelectorAll('td, th');
+    if (freshCells.length < 7) return false;
+    var upButton = freshCells[3].querySelector('button');
+    if (!upButton) return false;
+    hoverEl(freshRow);
+    hoverEl(freshCells[3]);
+    hoverEl(upButton);
+    upButton.click();
+    return true;
+  }
+
+  // Apakah cell NIK baris idx sudah ter-unmask (16 digit, tanpa '*')?
+  function cellUnmasked(idx) {
+    var r = modalRowAt(idx);
+    if (!r) return false;
+    var c = r.querySelectorAll('td, th');
+    if (!c.length) return false;
+    var t = (c[0].innerText || '').replace(/content_copy/g, '').trim();
+    return t.replace(/\D/g, '').length >= 16;
+  }
+
+  // Poll sampai NIK ter-unmask atau timeout; resolve true/false.
+  function waitUnmasked(idx, ms) {
+    var start = Date.now();
+    return new Promise(function (resolve) {
+      (function poll() {
+        if (cellUnmasked(idx)) return resolve(true);
+        if (Date.now() - start >= ms) return resolve(false);
+        setTimeout(poll, 150);
+      })();
+    });
   }
 
   function scrapeModalDetails(rowData) {
@@ -540,29 +603,17 @@
       if (row.querySelectorAll('td, th').length < 7) return resolve();
       row.scrollIntoView({ block: 'center' });
       delay(300).then(function () {
-        // v1.37b: ambil ulang baris dari DOM — klik baris sebelumnya
-        // memicu React me-render ulang tabel, node lama jadi detached.
-        var freshRow = modalRowAt(idx);
-        if (!freshRow) return;
-        var freshCells = freshRow.querySelectorAll('td, th');
-        if (freshCells.length < 7) return;
-        unhoverLast();
-        // v1.37: hover dulu (baris -> cell NIK -> span), baru klik — meniru
-        // gerakan mouse Playwright sebelum click() (lihat hoverEl).
-        var nikSpan = freshCells[0].querySelector('span');
-        hoverEl(freshRow);
-        hoverEl(freshCells[0]);
-        hoverEl(nikSpan);
-        lastHoverEl = nikSpan || freshCells[0];
-        return delay(300);
-      }).then(function () {
-        var freshRow = modalRowAt(idx);
-        if (!freshRow) return;
-        var freshCells = freshRow.querySelectorAll('td, th');
-        if (freshCells.length < 7) return;
-        var nikSpan = freshCells[0].querySelector('span');
-        if (nikSpan) nikSpan.click();
-        return delay(300);
+        // v1.37c: hover + klik ATOMIK, lalu VERIFIKASI dengan polling:
+        // baca ulang cell sampai NIK ter-unmask (16 digit, tanpa '*')
+        // atau timeout; bila masih termasking, ulangi hover+klik sekali
+        // lagi (tombol salin bisa saja baru ter-render sesudah hover).
+        hoverAndClickNik(idx);
+        return waitUnmasked(idx, 1500);
+      }).then(function (ok) {
+        if (ok) return;
+        log('NIK baris ' + (idx + 1) + ' masih termasking, coba hover+klik ulang...');
+        hoverAndClickNik(idx);
+        return waitUnmasked(idx, 1500);
       }).then(function () {
         var freshRow = modalRowAt(idx);
         if (!freshRow) return resolve();
@@ -570,6 +621,9 @@
         if (freshCells.length < 7) return resolve();
         var nikPenerima = (freshCells[0].innerText || '')
           .replace(/content_copy/g, '').trim();
+        if (nikPenerima.replace(/\D/g, '').length < 16) {
+          log('PERINGATAN baris ' + (idx + 1) + ': NIK masih termasking (' + nikPenerima + ')');
+        }
         var namaPenerima = (freshCells[1].innerText || '').trim();
         var komponen = (freshCells[2].innerText || '').trim();
         var status = (freshCells[6].innerText || '').trim();
@@ -588,21 +642,9 @@
           komponenLower.indexOf('aba') === -1;
         if (!isSekolah) { out.push(item); return resolve(); }
         log('Komponen Sekolah - membuka detail UP...');
-        var upButton = freshCells[3].querySelector('button');
-        if (!upButton) { out.push(item); return resolve(); }
-        // v1.37: hover dulu (baris -> cell -> tombol), baru klik — pola
-        // hover-reveal yang sama seperti span NIK di atas.
-        hoverEl(freshRow);
-        hoverEl(freshCells[3]);
-        hoverEl(upButton);
-        delay(300).then(function () {
-          // Ambil ulang tombol tepat sebelum klik (re-render bisa terjadi).
-          var r2 = modalRowAt(idx);
-          var c2 = r2 ? r2.querySelectorAll('td, th') : [];
-          var b2 = (c2.length > 3) ? c2[3].querySelector('button') : null;
-          if (b2) b2.click();
-          return delay(1500);
-        }).then(function () {
+        // v1.37c: hover + klik UP atomik juga (pola yang sama).
+        if (!hoverAndClickUp(idx)) { out.push(item); return resolve(); }
+        return delay(1500).then(function () {
           return scrapeDataSekolah();
         }).then(function (dataSekolah) {
           item.namaSekolah = dataSekolah.namaSekolah;
@@ -784,6 +826,7 @@
 
   // ====== INIT ======
   buildPanel();
+  log('SIKS Filter NIK v1.37c — hover+klik atomik, verifikasi unmask + retry');
   loadProgress();
   if (Object.keys(processedNik).length > 0) {
     setStatus('Siap. ' + Object.keys(processedNik).length +
