@@ -60,11 +60,24 @@
 //   alamat 9Router yang bisa dijangkau HP (alamat Tailscale PC atau URL
 //   publik router), bukan localhost.
 // - v1.3: panggilan AI lewat bridge native Galeriku.fetchText bila
-//   tersedia (aplikasi v1.38+) — request dari kode Java tidak kena CORS,
-//   jadi 9Router yang tidak punya dukungan CORS pun bisa dipanggil dari
-//   HP. Bila bridge tidak ada (mis. dibuka di browser lain), fallback ke
-//   fetch() browser seperti sebelumnya; bila itu gagal karena CORS,
-//   skrip mencatatnya jelas di log dan jatuh ke CAPTCHA manual panel.
+//   tersedia (aplikasi v1.38+) — request dari kode Java tidak kena
+//   preflight browser, jadi tidak tergantung setelan CORS server. Bila
+//   bridge tidak ada (mis. dibuka di browser lain), fallback ke fetch()
+//   browser seperti sebelumnya; bila itu gagal karena CORS, skrip
+//   mencatatnya jelas di log dan jatuh ke CAPTCHA manual panel.
+// - v1.4: tombol detail di HP — hasil di mobile berupa kartu di bawah
+//   lipatan halaman, jadi sebelum mencari tombol detail, jendela di-scroll
+//   sampai baris hasil di tengah layar (scroll lama hanya menggeser di
+//   dalam tbody, tidak pernah menggeser jendela). Fallback baru:
+//   button[aria-label="detail"], button apa pun yang aria-label-nya
+//   mengandung "detail", svg chevron apa pun, dan kartu hasil "KEPALA
+//   KELUARGA" itu sendiri. Bila tetap tidak ketemu, struktur area hasil
+//   dicatat ke log (DIAG) supaya perbaikan berikutnya tidak menebak.
+//   searchAndOpenModal kini mengembalikan status 'OK' | 'NO_DATA' |
+//   'DETAIL_FAIL' — yang gagal buka detail TIDAK dicatat sebagai "Data
+//   tidak ditemukan" dan TIDAK ditandai processed (dicoba lagi di run
+//   berikutnya); hanya pesan "Data tidak ditemukan" yang eksplisit dari
+//   halaman yang dicatat begitu.
 // - Modal + NIK termasking mengikuti pelajaran v1.37b/c/d dari userscript
 //   SIKS: baris diambil FRESH dari DOM per indeks (React me-render ulang
 //   sesudah klik); hover + klik ATOMIK dalam satu blok sinkron tanpa jeda;
@@ -1252,8 +1265,10 @@
     });
   }
 
-  // Cari tombol detail (chevron) di baris hasil pencarian — 4 fallback
+  // Cari tombol detail (chevron) di baris hasil pencarian — fallback
   // seperti skrip asli, masing-masing hanya dipakai bila terlihat.
+  // v1.4: ditambah pola button[aria-label="detail"] (pola SIKS di tabel
+  // anggota — lihat findIconButtonIn) + svg chevron apa pun.
   function findDetailButtonInRow(row) {
     var svg = row.querySelector('svg[data-testid="ChevronRightIcon"]');
     if (svg && isVisible(svg)) return svg;
@@ -1261,17 +1276,110 @@
     if (d1 && isVisible(d1)) return d1;
     var d2 = row.querySelector('div.css-ert4z0');
     if (d2 && isVisible(d2)) return d2;
+    var b = row.querySelector('button[aria-label="detail"]');
+    if (b && isVisible(b)) return b;
+    var btns = row.querySelectorAll('button');
+    for (var j = 0; j < btns.length; j++) {
+      var al = (btns[j].getAttribute('aria-label') || '').toLowerCase();
+      if (al.indexOf('detail') !== -1 && isVisible(btns[j])) return btns[j];
+    }
+    var svgs = row.querySelectorAll('svg[data-testid]');
+    for (var k = 0; k < svgs.length; k++) {
+      var tid = (svgs[k].getAttribute('data-testid') || '').toLowerCase();
+      if (tid.indexOf('chevron') !== -1 && isVisible(svgs[k])) return svgs[k];
+    }
     var els = row.querySelectorAll('*');
+    var best = null, bestLen = Infinity;
     for (var i = 0; i < els.length; i++) {
-      if (isVisible(els[i]) && (els[i].innerText || '').indexOf('Lihat Detail') !== -1) return els[i];
+      var t = els[i].innerText || '';
+      if (isVisible(els[i]) && t.indexOf('Lihat Detail') !== -1 && t.length < bestLen) { best = els[i]; bestLen = t.length; }
+    }
+    if (best) return best;
+    return null;
+  }
+
+  // v1.4: cari tombol detail di SELURUH area hasil, bukan hanya di baris
+  // pertama — di HP tombolnya bisa berada di kartu hasil (bukan di <tr>).
+  function findDetailButtonInResults() {
+    var area = document.querySelector('table') || document.body;
+    var btns = area.querySelectorAll('button[aria-label="detail"]');
+    for (var i = 0; i < btns.length; i++) if (isVisible(btns[i])) return btns[i];
+    var all = area.querySelectorAll('button');
+    for (var j = 0; j < all.length; j++) {
+      var al = (all[j].getAttribute('aria-label') || '').toLowerCase();
+      if (al.indexOf('detail') !== -1 && isVisible(all[j])) return all[j];
+    }
+    var svgs = area.querySelectorAll('svg[data-testid]');
+    for (var k = 0; k < svgs.length; k++) {
+      var tid = (svgs[k].getAttribute('data-testid') || '').toLowerCase();
+      if (tid.indexOf('chevron') !== -1 && isVisible(svgs[k])) return svgs[k];
+    }
+    var els = area.querySelectorAll('*');
+    var best = null, bestLen = Infinity;
+    for (var m = 0; m < els.length; m++) {
+      var t = els[m].innerText || '';
+      if (isVisible(els[m]) && t.indexOf('Lihat Detail') !== -1 && t.length < bestLen) { best = els[m]; bestLen = t.length; }
+    }
+    if (best) return best;
+    var card = findResultCard();
+    if (card) return card;
+    return null;
+  }
+
+  // v1.4: kartu hasil di HP — elemen terkecil yang memuat "KEPALA
+  // KELUARGA". Kembalikan tombol di dalam kartu bila ada, kalau tidak
+  // kartunya sendiri (kartu di HP sering bisa diklik untuk buka detail).
+  function findResultCard() {
+    var els = document.querySelectorAll('div, section, article');
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].innerText || '');
+      if (t.indexOf('KEPALA KELUARGA') === -1) continue;
+      if (t.length > 600) continue;
+      var b = els[i].querySelector('button, [role="button"]');
+      if (b && isVisible(b)) return b;
+      return els[i];
     }
     return null;
   }
 
+  // v1.4: bila tombol detail tetap tidak ketemu, catat struktur area
+  // hasil ke log panel supaya perbaikan berikutnya tidak menebak.
+  function logDetailDiagnostics(firstRow) {
+    try {
+      var rows = document.querySelectorAll('table tbody tr');
+      log('DIAG: ' + rows.length + ' baris hasil; baris 1: "' +
+        (firstRow ? (firstRow.innerText || '').replace(/\s+/g, ' ').slice(0, 150) : '(tidak ada)') + '"');
+      if (firstRow) {
+        var r = firstRow.getBoundingClientRect();
+        log('DIAG: baris 1 di layar: top=' + Math.round(r.top) + ' bottom=' + Math.round(r.bottom) +
+          ' (tinggi layar ' + window.innerHeight + '); svg di baris: ' +
+          firstRow.querySelectorAll('svg[data-testid]').length + '; button di baris: ' +
+          firstRow.querySelectorAll('button').length);
+      }
+      var kk = null;
+      var all = document.querySelectorAll('div');
+      for (var i = 0; i < all.length; i++) {
+        if ((all[i].innerText || '').indexOf('KEPALA KELUARGA') !== -1) { kk = all[i]; break; }
+      }
+      log('DIAG: kartu KEPALA KELUARGA: ' + (kk ? ('ada (' + kk.tagName + ' ' +
+        String(kk.className || '').slice(0, 60) + ', ' +
+        kk.querySelectorAll('button').length + ' button di dalamnya)') : 'tidak ada'));
+      var labels = [];
+      var btns = document.querySelectorAll('button[aria-label]');
+      for (var j = 0; j < btns.length && labels.length < 8; j++) {
+        labels.push(btns[j].getAttribute('aria-label'));
+      }
+      log('DIAG: aria-label button di halaman: [' + labels.join(', ') + ']');
+    } catch (e) { log('DIAG gagal: ' + e.message); }
+  }
+
   // Cari NIK -> CAPTCHA -> klik Cari Data -> tunggu tabel -> klik detail.
-  // Mengembalikan true bila modal terbuka, false bila tidak ditemukan /
-  // gagal sesudah 3 percobaan. (Alasan "RETRY_SEARCH" = ulangi percobaan
-  // dari awal dengan gambar CAPTCHA yang baru.)
+  // Mengembalikan 'OK' bila modal terbuka, 'NO_DATA' bila halaman
+  // menyatakan data tidak ditemukan, 'DETAIL_FAIL' bila gagal membuka
+  // modal sesudah 3 percobaan (tombol detail tidak ketemu / modal tidak
+  // terbuka) — DETAIL_FAIL tidak dicatat sebagai tidak ditemukan.
+  // (Alasan "RETRY_SEARCH" = ulangi percobaan dari awal dengan gambar
+  // CAPTCHA yang baru.)
   function searchAndOpenModal(nik) {
     var MAX_SEARCH_ATTEMPTS = 3;
     var attempt = 0;
@@ -1348,7 +1456,7 @@
           return waitFor('table tbody tr', 5000).then(function (row) {
             if (!row) {
               log('Tabel hasil pencarian tidak muncul.');
-              if (attempt >= MAX_SEARCH_ATTEMPTS) throw new Error('NO_DATA');
+              if (attempt >= MAX_SEARCH_ATTEMPTS) throw new Error('DETAIL_FAIL');
               return refreshCaptchaOnly().then(function () { throw new Error('RETRY_SEARCH'); });
             }
             log('Hasil pencarian muncul');
@@ -1359,19 +1467,32 @@
           var firstRow = document.querySelector('table tbody tr');
           if (!firstRow || !isVisible(firstRow)) {
             log('Row hasil tidak ditemukan');
-            if (attempt >= MAX_SEARCH_ATTEMPTS) throw new Error('NO_DATA');
+            if (attempt >= MAX_SEARCH_ATTEMPTS) throw new Error('DETAIL_FAIL');
             return refreshCaptchaOnly().then(function () { throw new Error('RETRY_SEARCH'); });
           }
-          scrollRowIntoViewIfNeeded(firstRow);
-          return delay(500).then(function () {
+          // v1.4 (mobile): di HP hasil berupa kartu di bawah lipatan
+          // halaman. scrollRowIntoViewIfNeeded lama hanya menggeser di
+          // dalam parent (tbody) dan tidak pernah menggeser jendela —
+          // baris tetap di bawah lipatan. Geser jendela sampai baris di
+          // tengah layar, lalu cari ulang barisnya FRESH.
+          try {
+            var rr = firstRow.getBoundingClientRect();
+            if (rr.top < 0 || rr.bottom > window.innerHeight) {
+              firstRow.scrollIntoView({ block: 'center', behavior: 'instant' });
+            }
+          } catch (e) {}
+          return delay(600).then(function () {
+            firstRow = document.querySelector('table tbody tr') || firstRow;
             var detailButton = findDetailButtonInRow(firstRow);
+            if (!detailButton) detailButton = findDetailButtonInResults();
             if (!detailButton) {
+              logDetailDiagnostics(firstRow);
               log('Tombol detail tidak ditemukan, mencoba klik row pertama...');
               clickEl(firstRow);
               return delay(1000).then(function () {
                 return waitFor('div[role="dialog"]', 3000).then(function (d) {
-                  if (d) { log('Modal berhasil dibuka'); return true; }
-                  if (attempt >= MAX_SEARCH_ATTEMPTS) throw new Error('NO_DATA');
+                  if (d) { log('Modal berhasil dibuka'); return 'OK'; }
+                  if (attempt >= MAX_SEARCH_ATTEMPTS) throw new Error('DETAIL_FAIL');
                   return refreshCaptchaOnly().then(function () { throw new Error('RETRY_SEARCH'); });
                 });
               });
@@ -1384,25 +1505,26 @@
               if (!d) throw new Error('MODAL_NOT_OPEN');
               return delay(400).then(function () {
                 log('Modal berhasil dibuka');
-                return true;
+                return 'OK';
               });
             });
           });
         })
         .catch(function (e) {
           if (e && e.message === 'RETRY_SEARCH') {
-            if (attempt >= MAX_SEARCH_ATTEMPTS) return false;
+            if (attempt >= MAX_SEARCH_ATTEMPTS) return 'DETAIL_FAIL';
             return attemptOnce();
           }
-          if (e && e.message === 'NO_DATA') return false;
+          if (e && e.message === 'NO_DATA') return 'NO_DATA';
+          if (e && e.message === 'DETAIL_FAIL') return 'DETAIL_FAIL';
           if (e && e.message === 'MODAL_NOT_OPEN') {
             log('Modal tidak terbuka');
-            if (attempt >= MAX_SEARCH_ATTEMPTS) return false;
+            if (attempt >= MAX_SEARCH_ATTEMPTS) return 'DETAIL_FAIL';
             return refreshCaptchaOnly().then(function () { return attemptOnce(); });
           }
           log('Error pada percobaan ' + attempt + ': ' + e.message);
-          if (e && /dibatalkan|Dihentikan/.test(e.message)) { stopRequested = true; return false; }
-          if (attempt >= MAX_SEARCH_ATTEMPTS) return false;
+          if (e && /dibatalkan|Dihentikan/.test(e.message)) { stopRequested = true; return 'DETAIL_FAIL'; }
+          if (attempt >= MAX_SEARCH_ATTEMPTS) return 'DETAIL_FAIL';
           return refreshCaptchaOnly().then(function () { return attemptOnce(); });
         });
     }
@@ -2079,8 +2201,18 @@
   function processOneNik(nik, currentNum, total) {
     setProgress('PROSES ' + currentNum + '/' + total + ': ' + nik);
     log('PROSES ' + currentNum + '/' + total + ': ' + nik);
-    return searchAndOpenModal(nik).then(function (modalOpened) {
-      if (!modalOpened) {
+    return searchAndOpenModal(nik).then(function (status) {
+      // v1.4: bedakan "benar-benar tidak ada data" (NO_DATA) dari "gagal
+      // membuka modal" (DETAIL_FAIL — mis. tombol detail tidak ketemu di
+      // HP). Yang gagal TIDAK dicatat sebagai tidak ditemukan dan TIDAK
+      // ditandai processed, supaya run berikutnya mencoba lagi.
+      if (status === 'DETAIL_FAIL') {
+        log('GAGAL buka detail untuk NIK ' + nik + ' — TIDAK dicatat sebagai tidak ditemukan; akan dicoba lagi di run berikutnya.');
+        saveProgress();
+        showResults();
+        return resetSearchForm();
+      }
+      if (status !== 'OK') {
         log('Modal tidak terbuka untuk NIK ' + nik + ' — dicatat sebagai tidak ditemukan.');
         results.dataKK.push({ NIK: nik, 'No KK': 'Data tidak ditemukan' });
         processedNik[nik] = true;
@@ -2204,6 +2336,6 @@
   if (!cfg0.endpoint || !cfg0.apiKey) {
     log('Config AI (endpoint/API key) belum diisi — CAPTCHA dijawab manual lewat panel. Isi config lalu Simpan config bila ingin pakai AI.');
   }
-  log('DTSEN Scraper v1.3 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
+  log('DTSEN Scraper v1.4 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
   if (window.console && console.log) console.log('[DTSEN] userscript dimuat — panel di kanan bawah.');
 })();
