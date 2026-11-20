@@ -59,9 +59,12 @@
 //   hanya jalan di PC; di HP, localhost adalah HP itu sendiri, jadi isi
 //   alamat 9Router yang bisa dijangkau HP (alamat Tailscale PC atau URL
 //   publik router), bukan localhost.
-// - Fetch AI lintas origin dari halaman SIKS bisa gagal karena CORS
-//   (tergantung header server endpoint). Bila gagal, skrip mencatatnya
-//   jelas di log dan jatuh ke CAPTCHA manual panel.
+// - v1.3: panggilan AI lewat bridge native Galeriku.fetchText bila
+//   tersedia (aplikasi v1.38+) — request dari kode Java tidak kena CORS,
+//   jadi 9Router yang tidak punya dukungan CORS pun bisa dipanggil dari
+//   HP. Bila bridge tidak ada (mis. dibuka di browser lain), fallback ke
+//   fetch() browser seperti sebelumnya; bila itu gagal karena CORS,
+//   skrip mencatatnya jelas di log dan jatuh ke CAPTCHA manual panel.
 // - Modal + NIK termasking mengikuti pelajaran v1.37b/c/d dari userscript
 //   SIKS: baris diambil FRESH dari DOM per indeks (React me-render ulang
 //   sesudah klik); hover + klik ATOMIK dalam satu blok sinkron tanpa jeda;
@@ -916,31 +919,60 @@
     });
   }
 
-  // Solver CAPTCHA via endpoint AI — pengganti captcha-solver-claude.js.
-  // Endpoint + API key + model diambil dari config panel (localStorage HP),
-  // TIDAK PERNAH hardcode. Fetch lintas origin dari halaman SIKS bisa
-  // gagal karena CORS (tergantung header server endpoint) — caller
-  // menangkap error ini dan jatuh ke CAPTCHA manual.
-  function solveCaptchaWithCustomEndpoint(dataUrl, apiKey, baseURL, model) {
-    var endpoint = String(baseURL || '').replace(/\/$/, '') + '/chat/completions';
-    return fetch(endpoint, {
+  // v1.3: Base64 -> string UTF-8 dengan benar (AI bisa mengembalikan
+  // non-ASCII; atob mentah tanpa decode UTF-8 akan merusaknya).
+  function b64ToUtf8(b64) {
+    var bin = atob(b64 || '');
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    try { return new TextDecoder('utf-8').decode(bytes); } catch (e) {
+      return decodeURIComponent(escape(bin));
+    }
+  }
+
+  // v1.3: kirim request AI — pakai bridge native bila ada (melewati
+  // CORS), fallback ke fetch() browser bila tidak ada. Mengembalikan
+  // Promise berisi teks respons (atau throw dengan pesan 'API error:
+  // <status> - <cuplikan>' yang sama seperti sebelumnya).
+  function requestAiText(url, headers, body) {
+    if (window.Galeriku && Galeriku.fetchText) {
+      log('Memakai bridge native Galeriku.fetchText (melewati CORS)...');
+      return new Promise(function (resolve, reject) {
+        var id = 'f' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+        var done = false;
+        var timer = setTimeout(function () {
+          if (done) return; done = true;
+          try { delete window.__galerikuFetchCb[id]; } catch (e) {}
+          reject(new Error('Bridge fetch timeout (100 dtk)'));
+        }, 100000);
+        window.__galerikuFetchCb = window.__galerikuFetchCb || {};
+        window.__galerikuFetchCb[id] = function (status, b64) {
+          if (done) return; done = true;
+          clearTimeout(timer);
+          try { delete window.__galerikuFetchCb[id]; } catch (e) {}
+          var text = '';
+          try { text = b64ToUtf8(b64 || ''); } catch (e) { text = ''; }
+          if (status === 0 || status >= 400) {
+            reject(new Error('API error: ' + status + ' - ' + text.substring(0, 200)));
+          } else {
+            resolve(text);
+          }
+        };
+        try {
+          Galeriku.fetchText(url, 'POST', JSON.stringify(headers), body, id);
+        } catch (e) {
+          if (done) return; done = true;
+          clearTimeout(timer);
+          try { delete window.__galerikuFetchCb[id]; } catch (e2) {}
+          reject(e);
+        }
+      });
+    }
+    log('Memakai fetch() browser (bridge Galeriku.fetchText tidak ada)...');
+    return fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + apiKey
-      },
-      body: JSON.stringify({
-        model: model,
-        max_tokens: 50,
-        temperature: 0,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: CAPTCHA_PROMPT },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ]
-        }]
-      })
+      headers: headers,
+      body: body
     }).then(function (resp) {
       if (!resp.ok) {
         return resp.text().then(function (t) {
@@ -948,7 +980,32 @@
         });
       }
       return resp.text();
-    }).then(function (responseText) {
+    });
+  }
+
+  // Solver CAPTCHA via endpoint AI — pengganti captcha-solver-claude.js.
+  // Endpoint + API key + model diambil dari config panel (localStorage HP),
+  // TIDAK PERNAH hardcode. v1.3: request lewat bridge native bila ada
+  // (melewati CORS); fallback fetch() browser, lalu CAPTCHA manual.
+  function solveCaptchaWithCustomEndpoint(dataUrl, apiKey, baseURL, model) {
+    var endpoint = String(baseURL || '').replace(/\/$/, '') + '/chat/completions';
+    var headers = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + apiKey
+    };
+    var body = JSON.stringify({
+      model: model,
+      max_tokens: 50,
+      temperature: 0,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: CAPTCHA_PROMPT },
+          { type: 'image_url', image_url: { url: dataUrl } }
+        ]
+      }]
+    });
+    return requestAiText(endpoint, headers, body).then(function (responseText) {
       var rawAnswer = '';
       if (responseText.indexOf('data:') === 0) {
         // Respons SSE (OpenAI-style streaming)
@@ -2147,6 +2204,6 @@
   if (!cfg0.endpoint || !cfg0.apiKey) {
     log('Config AI (endpoint/API key) belum diisi — CAPTCHA dijawab manual lewat panel. Isi config lalu Simpan config bila ingin pakai AI.');
   }
-  log('DTSEN Scraper v1.2 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
+  log('DTSEN Scraper v1.3 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
   if (window.console && console.log) console.log('[DTSEN] userscript dimuat — panel di kanan bawah.');
 })();
