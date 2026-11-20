@@ -397,10 +397,13 @@
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
+  // v1.2: pencocokan teks dibuat case-insensitive seperti :has-text
+  // Playwright ("Cari Data" vs "CARI DATA" vs "Cari data").
   function findButtonByText(text, root) {
+    var needle = String(text).toLowerCase();
     var btns = (root || document).querySelectorAll('button');
     for (var i = 0; i < btns.length; i++) {
-      if (isVisible(btns[i]) && (btns[i].innerText || '').indexOf(text) !== -1) return btns[i];
+      if (isVisible(btns[i]) && (btns[i].innerText || '').toLowerCase().indexOf(needle) !== -1) return btns[i];
     }
     return null;
   }
@@ -1241,19 +1244,32 @@
           return delay(500);
         })
         .then(function () {
-          var cariButton = findButtonByText('Cari Data');
-          if (!cariButton) throw new Error('Tombol Cari Data tidak ditemukan');
-          return waitForFn(function () {
-            return !isDisabled(cariButton) ? cariButton : null;
-          }, 5000).then(function (btn) {
-            if (!btn) {
-              log('Tombol Cari disabled, me-refresh CAPTCHA...');
-              return refreshCaptchaOnly().then(function () { throw new Error('RETRY_SEARCH'); });
-            }
-            clickEl(btn);
-            log('Tombol Cari diklik');
-            return delay(0);
-          });
+          // v1.2: tombol Cari Data TIDAK BOLEH dicari sekali jalan seperti
+          // sebelumnya — sesudah CAPTCHA diisi, React me-render ulang form
+          // dan tombol bisa belum muncul / masih tertukar node-nya saat
+          // lookup pertama dilakukan (itulah "tidak menemukan button
+          // setelah captcha"). Playwright mentolerir ini karena locator
+          // tidak menuntut tombol terlihat saat dicari, lalu menunggu
+          // enabled sampai 5 dtk. Di sini: tunggu tombol MUNCUL sampai
+          // 8 dtk, lalu tunggu ENABLED sampai 5 dtk — dan node tombol
+          // dicari ulang FRESH di tiap poll, karena React bisa menggantinya.
+          return waitForFn(function () { return findButtonByText('Cari Data'); }, 8000)
+            .then(function (found) {
+              if (!found) throw new Error('Tombol Cari Data tidak ditemukan');
+              return waitForFn(function () {
+                var b = findButtonByText('Cari Data');
+                return (b && !isDisabled(b)) ? b : null;
+              }, 5000);
+            })
+            .then(function (btn) {
+              if (!btn) {
+                log('Tombol Cari disabled, me-refresh CAPTCHA...');
+                return refreshCaptchaOnly().then(function () { throw new Error('RETRY_SEARCH'); });
+              }
+              clickEl(btn);
+              log('Tombol Cari diklik');
+              return delay(0);
+            });
         })
         .then(function () { return waitForLoadingComplete(); })
         .then(function () { return delay(1000); })
@@ -2131,6 +2147,6 @@
   if (!cfg0.endpoint || !cfg0.apiKey) {
     log('Config AI (endpoint/API key) belum diisi — CAPTCHA dijawab manual lewat panel. Isi config lalu Simpan config bila ingin pakai AI.');
   }
-  log('DTSEN Scraper v1.1 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
+  log('DTSEN Scraper v1.2 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
   if (window.console && console.log) console.log('[DTSEN] userscript dimuat — panel di kanan bawah.');
 })();
