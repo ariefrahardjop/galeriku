@@ -297,6 +297,44 @@
     panel.querySelector('#dtsen-captcha-kirim').addEventListener('click', submitManualCaptcha);
     panel.querySelector('#dtsen-captcha-batal').addEventListener('click', cancelManualCaptcha);
 
+    // v1.1: halaman SIKS (MUI) menahan fokus di dalam dialog/modal-nya
+    // (focus trap): begitu fokus pindah ke elemen di luar dialog, halaman
+    // menariknya kembali — input panel di luar dialog jadi tidak bisa
+    // diisi, padahal di web lain kolom yang sama bisa diisi. Dua pengaman,
+    // keduanya hanya menyentuh event dari dalam panel:
+    // (1) hentikan event focusin dari panel sebelum sampai ke document,
+    //     supaya trap halaman tidak pernah melihat fokus pindah ke panel;
+    // (2) bila fokus tetap dicuri (mis. halaman me-refocus inputnya
+    //     sendiri), kembalikan fokus ke field panel sekali sesudah 120ms
+    //     — hanya bila fokus dicuri <1 dtk sesudah didapat, supaya tidak
+    //     menarik balik fokus yang sengaja dipindah user.
+    var lastPanelField = null;
+    var lastPanelFieldTime = 0;
+    var refocusDoneForField = false;
+    panel.addEventListener('focusin', function (e) {
+      e.stopPropagation();
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+        lastPanelField = e.target;
+        lastPanelFieldTime = Date.now();
+        refocusDoneForField = false;
+      }
+    });
+    panel.addEventListener('focusout', function (e) {
+      var to = e.relatedTarget;
+      if (to && panel.contains(to)) return;
+      if (!lastPanelField || refocusDoneForField) return;
+      if (Date.now() - lastPanelFieldTime > 1000) return;
+      var field = lastPanelField;
+      refocusDoneForField = true;
+      setTimeout(function () {
+        try {
+          if (document.activeElement && !panel.contains(document.activeElement)) {
+            field.focus();
+          }
+        } catch (err) {}
+      }, 120);
+    });
+
     fillConfigFields();
   }
 
@@ -2093,6 +2131,6 @@
   if (!cfg0.endpoint || !cfg0.apiKey) {
     log('Config AI (endpoint/API key) belum diisi — CAPTCHA dijawab manual lewat panel. Isi config lalu Simpan config bila ingin pakai AI.');
   }
-  log('DTSEN Scraper v1.0 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
+  log('DTSEN Scraper v1.1 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
   if (window.console && console.log) console.log('[DTSEN] userscript dimuat — panel di kanan bawah.');
 })();
