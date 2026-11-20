@@ -477,6 +477,34 @@
   }
 
   // ====== FASE 2b: SCRAPE MODAL DETAILS ======
+  // v1.37b: JANGAN simpan referensi baris sekali di awal. Klik span NIK
+  // baris 1 memicu React me-render ulang isi tabel modal, sehingga
+  // elemen <tr> yang sudah ditangkap jadi node lepas (detached): hover
+  // dan klik sesudahnya mengenai salinan lama yang tidak ada di layar,
+  // dan innerText yang dibaca tetap yang lama (NIK tetap termasking).
+  // Karena itu tiap baris diambil FRESH dari DOM berdasarkan indeksnya,
+  // dan cell/span dibaca ulang tepat sebelum dipakai. Sebelum hover
+  // baris baru, hover baris lama dilepas dulu (mouseout) supaya
+  // pelacakan hover React tidak mengira mouse masih di baris lama.
+  var lastHoverEl = null;
+  function unhoverLast() {
+    if (!lastHoverEl) return;
+    try {
+      var r = lastHoverEl.getBoundingClientRect();
+      var opts = { bubbles: true, cancelable: true,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+      lastHoverEl.dispatchEvent(new MouseEvent('mouseout', opts));
+      lastHoverEl.dispatchEvent(new MouseEvent('mouseleave', opts));
+    } catch (e) {}
+    lastHoverEl = null;
+  }
+  function modalRowAt(idx) {
+    var tb = document.querySelector('.MuiDialogContent-root table tbody');
+    if (!tb) return null;
+    var rs = tb.querySelectorAll('tr');
+    return rs[idx] || null;
+  }
+
   function scrapeModalDetails(rowData) {
     return new Promise(function (resolve) {
       var out = [];
@@ -486,15 +514,17 @@
       }).then(function () {
         var tbody = document.querySelector('.MuiDialogContent-root table tbody');
         if (!tbody) { log('Tabel modal tidak ditemukan'); return resolve(out); }
-        var rows = tbody.querySelectorAll('tr');
-        log('Ditemukan ' + rows.length + ' komponen');
+        var rowCount = tbody.querySelectorAll('tr').length;
+        log('Ditemukan ' + rowCount + ' komponen');
         var chain = Promise.resolve();
-        rows.forEach(function (row, i) {
-          chain = chain.then(function () {
-            if (stopRequestedNow()) return;
-            return scrapeModalRow(row, i, rowData, out);
-          });
-        });
+        for (var i = 0; i < rowCount; i++) {
+          (function (idx) {
+            chain = chain.then(function () {
+              if (stopRequestedNow()) return;
+              return scrapeModalRow(idx, rowData, out);
+            });
+          })(i);
+        }
         return chain.then(function () { resolve(out); });
       }).catch(function (e) {
         log('Error scraping modal: ' + e.message);
@@ -503,29 +533,46 @@
     });
   }
 
-  function scrapeModalRow(row, i, rowData, out) {
+  function scrapeModalRow(idx, rowData, out) {
     return new Promise(function (resolve) {
-      var cells = row.querySelectorAll('td, th');
-      if (cells.length < 7) return resolve();
+      var row = modalRowAt(idx);
+      if (!row) return resolve();
+      if (row.querySelectorAll('td, th').length < 7) return resolve();
       row.scrollIntoView({ block: 'center' });
       delay(300).then(function () {
+        // v1.37b: ambil ulang baris dari DOM — klik baris sebelumnya
+        // memicu React me-render ulang tabel, node lama jadi detached.
+        var freshRow = modalRowAt(idx);
+        if (!freshRow) return;
+        var freshCells = freshRow.querySelectorAll('td, th');
+        if (freshCells.length < 7) return;
+        unhoverLast();
         // v1.37: hover dulu (baris -> cell NIK -> span), baru klik — meniru
         // gerakan mouse Playwright sebelum click() (lihat hoverEl).
-        var nikSpan = cells[0].querySelector('span');
-        hoverEl(row);
-        hoverEl(cells[0]);
+        var nikSpan = freshCells[0].querySelector('span');
+        hoverEl(freshRow);
+        hoverEl(freshCells[0]);
         hoverEl(nikSpan);
+        lastHoverEl = nikSpan || freshCells[0];
         return delay(300);
       }).then(function () {
-        var nikSpan = cells[0].querySelector('span');
+        var freshRow = modalRowAt(idx);
+        if (!freshRow) return;
+        var freshCells = freshRow.querySelectorAll('td, th');
+        if (freshCells.length < 7) return;
+        var nikSpan = freshCells[0].querySelector('span');
         if (nikSpan) nikSpan.click();
         return delay(300);
       }).then(function () {
-        var nikPenerima = (cells[0].innerText || '')
+        var freshRow = modalRowAt(idx);
+        if (!freshRow) return resolve();
+        var freshCells = freshRow.querySelectorAll('td, th');
+        if (freshCells.length < 7) return resolve();
+        var nikPenerima = (freshCells[0].innerText || '')
           .replace(/content_copy/g, '').trim();
-        var namaPenerima = (cells[1].innerText || '').trim();
-        var komponen = (cells[2].innerText || '').trim();
-        var status = (cells[6].innerText || '').trim();
+        var namaPenerima = (freshCells[1].innerText || '').trim();
+        var komponen = (freshCells[2].innerText || '').trim();
+        var status = (freshCells[6].innerText || '').trim();
         log('- ' + namaPenerima + ' | Komponen: ' + komponen + ' | Status: ' + status);
         var item = {
           nik_pengurus: rowData.nik_pengurus, nokk: rowData.nokk,
@@ -541,15 +588,19 @@
           komponenLower.indexOf('aba') === -1;
         if (!isSekolah) { out.push(item); return resolve(); }
         log('Komponen Sekolah - membuka detail UP...');
-        var upButton = cells[3].querySelector('button');
+        var upButton = freshCells[3].querySelector('button');
         if (!upButton) { out.push(item); return resolve(); }
         // v1.37: hover dulu (baris -> cell -> tombol), baru klik — pola
         // hover-reveal yang sama seperti span NIK di atas.
-        hoverEl(row);
-        hoverEl(cells[3]);
+        hoverEl(freshRow);
+        hoverEl(freshCells[3]);
         hoverEl(upButton);
         delay(300).then(function () {
-          upButton.click();
+          // Ambil ulang tombol tepat sebelum klik (re-render bisa terjadi).
+          var r2 = modalRowAt(idx);
+          var c2 = r2 ? r2.querySelectorAll('td, th') : [];
+          var b2 = (c2.length > 3) ? c2[3].querySelector('button') : null;
+          if (b2) b2.click();
           return delay(1500);
         }).then(function () {
           return scrapeDataSekolah();
@@ -575,7 +626,7 @@
           }
         }).then(function () { resolve(); });
       }).catch(function (e) {
-        log('Error scraping detail item ' + (i + 1) + ': ' + e.message);
+        log('Error scraping detail item ' + (idx + 1) + ': ' + e.message);
         resolve();
       });
     });
