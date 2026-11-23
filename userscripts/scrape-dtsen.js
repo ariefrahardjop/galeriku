@@ -88,6 +88,20 @@
 //   dicatat ke log (DIAG anggota). extractDataAnggotaKeluarga kini
 //   menunggu baris muncul sampai 5 dtk (render HP lambat), bukan hitung
 //   sekali jalan sesudah 500ms.
+// - v1.6: AKAR MASALAH KETEMU (baca bundle JS SIKS langsung, 24 Nov 2026):
+//   anggota BUKAN baris tabel yang bisa di-expand — tidak ada
+//   ExpandMoreIcon di bundle SIKS mana pun (satu-satunya kemunculan adalah
+//   definisi ikon di library MUI). Tiap anggota adalah KARTU (mobile) /
+//   div ber-border (desktop) berisi label "Nama Lengkap", "NIK" (tampil
+//   10 digit + ******, hover pada wadahnya menampilkan 16 digit),
+//   "Hubungan", "Pekerjaan Utama", chip status, dan toggle "Lihat Aksi &
+//   Layanan". Tombol aksi (Lihat Detail = search, Sinkronkan dengan
+//   Dapodik = school) ada di dalam Collapse unmountOnExit — TIDAK ADA di
+//   DOM sebelum kartu dibuka; itulah kenapa v1.0-v1.5 tidak pernah
+//   menemukan tombol apa pun. Tombol ikon juga TIDAK punya
+//   aria-label="detail" — dicari lewat span.material-icons di dalam
+//   button apa pun. Alur baru: cari kartu lewat label "Nama Lengkap" ->
+//   parse label/nilai -> hover NIK -> klik toggle -> klik search/school.
 // - Modal + NIK termasking mengikuti pelajaran v1.37b/c/d dari userscript
 //   SIKS: baris diambil FRESH dari DOM per indeks (React me-render ulang
 //   sesudah klik); hover + klik ATOMIK dalam satu blok sinkron tanpa jeda;
@@ -506,28 +520,120 @@
   }
   function scrollRowIntoViewIfNeeded(row) { scrollIntoViewIfNeededEl(row); }
 
-  // Baris anggota diambil FRESH dari DOM per indeks (v1.37b) — jangan
-  // simpan NodeList sekali di awal, React me-render ulang sesudah klik.
-  function anggotaRowAt(idx) {
-    var m = mainDialog();
-    if (!m) return null;
-    var rs = m.querySelectorAll('table tbody tr');
-    return rs[idx] || null;
-  }
-
-  function collapseInRow(idx) {
-    var r = anggotaRowAt(idx);
-    if (!r) return null;
-    return r.querySelector('div.MuiCollapse-root.MuiCollapse-entered');
-  }
-
+  // v1.6: tombol ikon di kartu anggota — TIDAK ada aria-label="detail"
+  // (bundle SIKS: an.Z merender IconButton + span.material-icons saja).
+  // Cari button apa pun yang berisi span.material-icons dengan teks persis.
   function findIconButtonIn(root, iconText) {
-    var btns = root.querySelectorAll('button[aria-label="detail"]');
+    if (!root) return null;
+    var btns = root.querySelectorAll('button');
     for (var i = 0; i < btns.length; i++) {
       var sp = btns[i].querySelector('span.material-icons');
       if (sp && (sp.innerText || '').trim() === iconText && isVisible(btns[i])) return btns[i];
     }
     return null;
+  }
+
+  // v1.6: anggota di SIKS saat ini BUKAN baris tabel yang bisa di-expand
+  // (tidak ada ExpandMoreIcon di bundle SIKS mana pun — kemunculan
+  // satu-satunya adalah definisi ikon di library MUI). Tiap anggota
+  // adalah KARTU (mobile) / div ber-border (desktop) dengan label
+  // "Nama Lengkap" + tombol "Lihat Aksi & Layanan". Kartu dicari lewat
+  // labelnya, lalu naik ke ancestor yang memuat toggle aksinya.
+  function findAnggotaCards() {
+    var m = mainDialog();
+    if (!m) return [];
+    var labels = m.querySelectorAll('*');
+    var cards = [];
+    for (var i = 0; i < labels.length; i++) {
+      var el = labels[i];
+      if (el.children.length !== 0) continue;
+      if ((el.innerText || '').trim() !== 'Nama Lengkap') continue;
+      var node = el;
+      while (node && node !== m) {
+        var t = (node.innerText || '');
+        if (t.indexOf('Lihat Aksi & Layanan') !== -1 || t.indexOf('Tutup Aksi & Layanan') !== -1) break;
+        node = node.parentElement;
+      }
+      if (node && node !== m && cards.indexOf(node) === -1) cards.push(node);
+    }
+    return cards;
+  }
+
+  // Isi kartu sebagai pasangan label -> nilai (label persis satu baris,
+  // nilai di baris berikutnya): "Nama Lengkap", "NIK", "Hubungan",
+  // "Pekerjaan Utama"; status dibaca dari chip AKTIF / TIDAK AKTIF /
+  // PROSES AKTIF.
+  function parseCardText(card) {
+    var text = (card.innerText || '');
+    var lines = text.split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return l; });
+    var out = { nama: '', nik: '', hubungan: '', pekerjaan: '', status: '' };
+    for (var j = 0; j < lines.length; j++) {
+      if (lines[j] === 'Nama Lengkap' && j + 1 < lines.length) out.nama = lines[j + 1];
+      if (lines[j] === 'NIK' && j + 1 < lines.length) out.nik = lines[j + 1];
+      if (lines[j] === 'Hubungan' && j + 1 < lines.length) out.hubungan = lines[j + 1];
+      if (lines[j] === 'Pekerjaan Utama' && j + 1 < lines.length) out.pekerjaan = lines[j + 1];
+      if (lines[j] === 'AKTIF' || lines[j] === 'TIDAK AKTIF' || lines[j] === 'PROSES AKTIF') out.status = lines[j];
+    }
+    return out;
+  }
+
+  // Elemen teks NIK di kartu (komponen zn/Hn: tampil 10 digit + ******,
+  // hover pada wadahnya menampilkan 16 digit penuh; ada juga tombol
+  // Salin NIK). Ambil pemilik teks yang paling dalam.
+  function findNikElInCard(card) {
+    var els = card.querySelectorAll('*');
+    var best = null;
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].innerText || '').trim();
+      if (!t) continue;
+      if (/^\d{16}$/.test(t) || /^\d{10}\*{6}$/.test(t)) {
+        if (els[i].children.length === 0) return els[i];
+        if (!best) best = els[i];
+      }
+    }
+    return best;
+  }
+
+  function findAksiToggleInCard(card) {
+    var els = card.querySelectorAll('*');
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].innerText || '').trim();
+      if (t === 'Lihat Aksi & Layanan' || t === 'Tutup Aksi & Layanan') return els[i];
+    }
+    return null;
+  }
+
+  function isCardExpanded(card) {
+    if (!card || !card.isConnected) return false;
+    if ((card.innerText || '').indexOf('Tutup Aksi & Layanan') !== -1) return true;
+    return !!findIconButtonIn(card, 'search');
+  }
+
+  // v1.6: catat struktur kartu anggota ke log bila expand gagal.
+  function logAnggotaDiagnostics(idx, card) {
+    try {
+      var m = mainDialog();
+      var cards = findAnggotaCards();
+      log('DIAG anggota: ' + cards.length + ' kartu di modal; kartu ' + (idx + 1) + ': "' +
+        (card ? (card.innerText || '').replace(/\s+/g, ' ').slice(0, 140) : '(tidak ada)') + '"');
+      if (card) {
+        var r = card.getBoundingClientRect();
+        log('DIAG anggota: kartu di layar top=' + Math.round(r.top) + ' bottom=' + Math.round(r.bottom) +
+          ' (tinggi layar ' + window.innerHeight + '); button di kartu: ' +
+          card.querySelectorAll('button').length + '; toggle aksi: ' +
+          (findAksiToggleInCard(card) ? 'ada' : 'tidak ada') + '; tombol search: ' +
+          (findIconButtonIn(card, 'search') ? 'ada' : 'tidak ada'));
+      }
+      var namaCount = 0;
+      if (m) {
+        var all = m.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+          if ((all[i].innerText || '') === 'Nama Lengkap') namaCount++;
+        }
+      }
+      log('DIAG anggota: label "Nama Lengkap" di modal: ' + namaCount +
+        '; baris table tbody tr: ' + (m ? m.querySelectorAll('table tbody tr').length : 0));
+    } catch (e) { log('DIAG anggota gagal: ' + e.message); }
   }
 
   // extractValue (ada di skrip asli, tidak dipakai di mana pun di sana —
@@ -1627,114 +1733,111 @@
   }
 
   // ====== EKSTRAKSI: ANGGOTA KELUARGA ======
-  function findNikElInRow(idx) {
-    var row = anggotaRowAt(idx);
-    if (!row) return null;
-    var els = row.querySelectorAll('p.css-hfe2ew, p.MuiTypography-body1.css-hfe2ew');
-    for (var i = 0; i < els.length; i++) {
-      var t = (els[i].innerText || '').trim();
-      if (t && (t.indexOf('*') !== -1 || /^\d{16}$/.test(t))) return els[i];
-    }
-    return null;
-  }
-
-  // NIK anggota termasking di baris: hover + klik ATOMIK, verifikasi
-  // unmask (16 digit tanpa '*') + satu retry. Pola v1.37b/c/d.
-  function tryUnmaskNik(idx) {
-    var el = findNikElInRow(idx);
+  // v1.6: NIK kartu termasking (10 digit + ******) — unmask lewat HOVER
+  // pada wadah NIK (komponen zn/Hn: onMouseEnter menampilkan NIK penuh),
+  // verifikasi 16 digit + satu retry. Klik pada teks NIK tidak membuka
+  // apa-apa; hover-lah yang bekerja (pola v1.37b/c/d).
+  function tryUnmaskNikInCard(card) {
+    var el = findNikElInCard(card);
     if (!el) return Promise.resolve(null);
     var t0 = (el.innerText || '').trim();
-    if (/^\d{16}$/.test(t0)) { log('NIK sudah lengkap dari row: ' + t0); return Promise.resolve(t0); }
+    if (/^\d{16}$/.test(t0)) { log('NIK sudah lengkap dari kartu: ' + t0); return Promise.resolve(t0); }
     if (t0.indexOf('*') === -1) return Promise.resolve(null);
-    log('NIK ditemukan di row: ' + t0);
-    log('Klik NIK termasking untuk membuka...');
-    var row = anggotaRowAt(idx);
-    if (row) hoverEl(row);
-    hoverEl(el);
-    clickEl(el);
+    log('NIK ditemukan di kartu: ' + t0);
+    function hoverNik() {
+      var node = el;
+      for (var k = 0; k < 3 && node; k++) { hoverEl(node); node = node.parentElement; }
+      clickEl(el);
+    }
+    hoverNik();
     function pollUnmask() {
       return waitForFn(function () {
-        var e2 = findNikElInRow(idx);
+        var e2 = findNikElInCard(card);
         if (!e2) return null;
         var t = (e2.innerText || '').trim();
         return /^\d{16}$/.test(t) ? t : null;
       }, 1500);
     }
     return pollUnmask().then(function (v) {
-      if (v) { log('NIK lengkap setelah klik: ' + v); return v; }
-      log('NIK masih termasking setelah klik, coba hover+klik ulang...');
-      var row2 = anggotaRowAt(idx);
-      var el2 = findNikElInRow(idx);
-      if (row2 && el2) { hoverEl(row2); hoverEl(el2); clickEl(el2); }
+      if (v) { log('NIK lengkap setelah hover: ' + v); return v; }
+      log('NIK masih termasking setelah hover, coba hover ulang...');
+      hoverNik();
       return pollUnmask();
     }).then(function (v) {
-      if (v) log('NIK lengkap setelah klik: ' + v);
-      else log('PERINGATAN: NIK anggota baris ' + (idx + 1) + ' masih termasking');
+      if (v) log('NIK lengkap setelah hover: ' + v);
+      else log('PERINGATAN: NIK anggota masih termasking (lanjut dengan NIK termasking)');
       return v;
     });
   }
 
-  function unmaskNikInCollapse(idx, memberData) {
-    var c = collapseInRow(idx);
-    if (!c) return Promise.resolve();
-    var els = c.querySelectorAll('p.MuiTypography-body1.css-hfe2ew, p.css-hfe2ew');
-    for (var i = 0; i < els.length; i++) {
-      var t = (els[i].innerText || '').trim();
-      if (/^\d{16}$/.test(t)) {
-        memberData.nikAnggota = t;
-        log('NIK lengkap (dari element): ' + t);
-        return Promise.resolve();
+  // v1.6: buka kartu anggota lewat toggle "Lihat Aksi & Layanan", lalu
+  // klik Lihat Detail (search) + Sinkronkan Dapodik (school) di area
+  // aksi yang baru muncul (Collapse unmountOnExit — tombol TIDAK ADA di
+  // DOM sebelum kartu dibuka; itulah kenapa v1.0-v1.5 tidak pernah
+  // menemukan tombol apa pun di "baris" anggota).
+  function expandAnggotaCard(idx, memberData, namaAnggota) {
+    var cards = findAnggotaCards();
+    var card = cards[idx];
+    if (!card) return Promise.resolve(false);
+    try {
+      var rr = card.getBoundingClientRect();
+      if (rr.top < 0 || rr.bottom > window.innerHeight) {
+        card.scrollIntoView({ block: 'center', behavior: 'instant' });
       }
-    }
-    var ps = c.querySelectorAll('p');
-    var plist = [];
-    for (var j = 0; j < ps.length; j++) {
-      var tx = (ps[j].innerText || '');
-      if (tx.indexOf('*') !== -1 && /\d{6,}/.test(tx)) plist.push(ps[j]);
-    }
-    var chain = Promise.resolve(false);
-    plist.forEach(function (p) {
-      chain = chain.then(function (done) {
-        if (done) return true;
-        log('NIK termasking ditemukan: ' + (p.innerText || '').trim());
-        hoverEl(p);
-        clickEl(p);
-        return delay(800).then(function () {
-          var c2 = collapseInRow(idx);
-          if (!c2) return false;
-          var els2 = c2.querySelectorAll('p.css-hfe2ew, p.MuiTypography-body1');
-          for (var k = 0; k < els2.length; k++) {
-            var t2 = (els2[k].innerText || '').trim();
-            if (/^\d{16}$/.test(t2)) {
-              memberData.nikAnggota = t2;
-              log('NIK lengkap setelah klik: ' + t2);
-              return true;
-            }
-          }
+    } catch (e) {}
+    return delay(600).then(function () {
+      var cards2 = findAnggotaCards();
+      var card2 = cards2[idx];
+      if (!card2) { log('Kartu anggota ' + (idx + 1) + ' hilang sesudah scroll'); return false; }
+      if (isCardExpanded(card2)) {
+        log('Kartu anggota sudah terbuka');
+        return expandCardContent(idx, memberData, namaAnggota);
+      }
+      var toggle = findAksiToggleInCard(card2);
+      if (!toggle) {
+        log('Toggle "Lihat Aksi & Layanan" tidak ditemukan — klik kartu langsung...');
+        logAnggotaDiagnostics(idx, card2);
+        clickEl(card2);
+      } else {
+        log('Membuka kartu anggota untuk ' + namaAnggota + '...');
+        clickEl(toggle);
+      }
+      return delay(800).then(function () {
+        return waitForFn(function () {
+          var c = findAnggotaCards()[idx];
+          return (c && isCardExpanded(c)) ? c : null;
+        }, 4000);
+      }).then(function (opened) {
+        if (!opened) {
+          log('Kartu anggota tidak terbuka sesudah klik toggle');
+          logAnggotaDiagnostics(idx, findAnggotaCards()[idx]);
           return false;
-        });
+        }
+        log('Kartu anggota terbuka');
+        return expandCardContent(idx, memberData, namaAnggota);
       });
     });
-    return chain.then(function (done) {
-      if (done) return;
-      var c3 = collapseInRow(idx);
-      if (!c3) return;
-      if (!memberData.nikAnggota || memberData.nikAnggota.indexOf('*') !== -1) {
-        var m = (c3.innerText || '').match(/\b(\d{16})\b/);
-        if (m && m[1]) {
-          memberData.nikAnggota = m[1];
-          log('NIK lengkap (fallback regex): ' + m[1]);
-        }
-      }
-    }).catch(function (e) { log('Error mengambil NIK lengkap: ' + e.message); });
   }
 
-  function extractDetailFromCollapse(idx, memberData, namaAnggota) {
-    var c = collapseInRow(idx);
-    if (!c) return Promise.resolve();
-    var btn = findIconButtonIn(c, 'search');
-    if (!btn) return Promise.resolve();
-    log('Klik tombol detail anggota...');
+  // Isi kartu yang terbuka: detail + Dapodik, lalu tutup kartu lagi.
+  function expandCardContent(idx, memberData, namaAnggota) {
+    return extractDetailFromCard(idx, memberData, namaAnggota).then(function () {
+      return extractDapodikFromCard(idx, memberData, namaAnggota);
+    }).then(function () {
+      var cards = findAnggotaCards();
+      var card = cards[idx];
+      var toggle = card ? findAksiToggleInCard(card) : null;
+      if (toggle && (toggle.innerText || '').trim() === 'Tutup Aksi & Layanan') clickEl(toggle);
+      return delay(500);
+    });
+  }
+
+  function extractDetailFromCard(idx, memberData, namaAnggota) {
+    var card = findAnggotaCards()[idx];
+    if (!card) return Promise.resolve();
+    var btn = findIconButtonIn(card, 'search');
+    if (!btn) { log('Tombol Lihat Detail tidak ditemukan di kartu'); return Promise.resolve(); }
+    log('Klik tombol Lihat Detail anggota...');
     clickEl(btn);
     return delay(500).then(function () { return waitForLoadingComplete(); }).then(function () {
       return extractDetailAnggota(memberData.nikAnggota, namaAnggota);
@@ -1746,26 +1849,20 @@
     }).catch(function (e) { log('Error detail anggota: ' + e.message); });
   }
 
-  function extractDapodikFromCollapse(idx, memberData, namaAnggota) {
-    var c = collapseInRow(idx);
-    if (!c) return Promise.resolve();
-    var schoolBtn = findIconButtonIn(c, 'school');
+  function extractDapodikFromCard(idx, memberData, namaAnggota) {
+    var card = findAnggotaCards()[idx];
+    if (!card) return Promise.resolve();
+    var schoolBtn = findIconButtonIn(card, 'school');
     if (!schoolBtn) {
-      var spans = c.querySelectorAll('button span.material-icons');
-      for (var i = 0; i < spans.length; i++) {
-        if ((spans[i].innerText || '').trim() === 'school') {
-          var pb = spans[i].closest('button');
-          if (pb && isVisible(pb)) { schoolBtn = pb; break; }
-        }
-      }
-    }
-    if (!schoolBtn) { log('Tombol pendidikan tidak ditemukan'); return Promise.resolve(); }
-    var parentButton = schoolBtn.closest('button') || schoolBtn;
-    if (isDisabled(parentButton)) {
-      log('Tombol pendidikan disabled (tidak bersekolah)');
+      log('Tombol Dapodik tidak ditemukan di kartu (mungkin tidak tampil untuk peran ini)');
       return Promise.resolve();
     }
-    log('Klik tombol data pendidikan...');
+    var parentButton = schoolBtn.closest('button') || schoolBtn;
+    if (isDisabled(parentButton)) {
+      log('Tombol Dapodik disabled (tidak bersekolah / tidak aktif)');
+      return Promise.resolve();
+    }
+    log('Klik tombol Sinkronkan dengan Dapodik...');
     clickEl(parentButton);
     return delay(1000).then(function () {
       return extractDapodikData(memberData.nikAnggota, namaAnggota);
@@ -1777,158 +1874,26 @@
     }).catch(function (e) { log('Error data pendidikan: ' + e.message); });
   }
 
-  // v1.5: cari kontrol expand di baris anggota — beberapa fallback,
-  // karena di HP ikon ExpandMore bisa disembunyikan (display:none) dan
-  // baris/kartu sendiri yang bisa diketuk untuk expand.
-  function findExpandControlInRow(row) {
-    var svg = row.querySelector('svg[data-testid="ExpandMoreIcon"]');
-    if (svg && isVisible(svg)) return svg;
-    var wrap = row.querySelector('button svg[data-testid="ExpandMoreIcon"]');
-    if (wrap && isVisible(wrap)) return wrap.closest('button') || wrap;
-    var svgs = row.querySelectorAll('svg[data-testid]');
-    for (var i = 0; i < svgs.length; i++) {
-      var tid = (svgs[i].getAttribute('data-testid') || '').toLowerCase();
-      if ((tid.indexOf('expand') !== -1 || tid.indexOf('chevron') !== -1) && isVisible(svgs[i])) return svgs[i];
-    }
-    var btns = row.querySelectorAll('button');
-    for (var j = 0; j < btns.length; j++) {
-      var al = (btns[j].getAttribute('aria-label') || '').toLowerCase();
-      if ((al.indexOf('expand') !== -1 || al.indexOf('detail') !== -1) && isVisible(btns[j])) return btns[j];
-    }
-    return null;
-  }
-
-  function expandAnggotaRow(idx, memberData, namaAnggota) {
-    var row = anggotaRowAt(idx);
-    if (!row) return Promise.resolve();
-    // v1.5: scroll dulu (jendela) sampai baris terlihat, jeda, lalu cari
-    // ulang barisnya FRESH — pelajaran v1.4 di tombol detail.
-    try {
-      var rr = row.getBoundingClientRect();
-      if (rr.top < 0 || rr.bottom > window.innerHeight) {
-        row.scrollIntoView({ block: 'center', behavior: 'instant' });
-      }
-    } catch (e) {}
-    return delay(600).then(function () {
-      var row2 = anggotaRowAt(idx);
-      if (!row2) return;
-      var expandIcon = findExpandControlInRow(row2);
-      if (!expandIcon) {
-        log('Row tidak memiliki expand icon — mencoba klik barisnya langsung...');
-        logAnggotaDiagnostics(idx, row2);
-        clickEl(row2);
-        return delay(800).then(function () {
-          return waitForFn(function () {
-            var c = collapseInRow(idx);
-            return (c && isVisible(c)) ? c : null;
-          }, 3000);
-        }).then(function (collapse) {
-          if (!collapse) { log('Collapse tidak terbuka sesudah klik baris'); return; }
-          log('Collapse area terbuka (klik baris)');
-          return expandCollapseContent(idx, memberData, namaAnggota);
-        });
-      }
-      log('Expand row untuk ' + namaAnggota + '...');
-      clickEl(expandIcon);
-      return delay(800).then(function () {
-        return waitForFn(function () {
-          var c = collapseInRow(idx);
-          return (c && isVisible(c)) ? c : null;
-        }, 3000);
-      }).then(function (collapse) {
-        if (!collapse) {
-          log('Collapse tidak terbuka — mencoba klik barisnya langsung...');
-          logAnggotaDiagnostics(idx, row2);
-          clickEl(row2);
-          return delay(800).then(function () {
-            return waitForFn(function () {
-              var c2 = collapseInRow(idx);
-              return (c2 && isVisible(c2)) ? c2 : null;
-            }, 3000);
-          }).then(function (collapse2) {
-            if (!collapse2) { log('Collapse tetap tidak terbuka'); return; }
-            log('Collapse area terbuka (klik baris)');
-            return expandCollapseContent(idx, memberData, namaAnggota);
-          });
-        }
-        log('Collapse area terbuka');
-        return expandCollapseContent(idx, memberData, namaAnggota);
-      });
-    });
-  }
-
-  // Isi collapse yang terbuka: unmask NIK + detail + Dapodik, lalu tutup.
-  function expandCollapseContent(idx, memberData, namaAnggota) {
-    return unmaskNikInCollapse(idx, memberData).then(function () {
-      return extractDetailFromCollapse(idx, memberData, namaAnggota);
+  function processAnggotaCard(idx, nikCari, noKK, members) {
+    var cards = findAnggotaCards();
+    var card = cards[idx];
+    if (!card) return Promise.resolve();
+    var parsed = parseCardText(card);
+    var namaAnggota = parsed.nama;
+    log('Anggota ' + (idx + 1) + ': ' + namaAnggota + ' (' + parsed.hubungan + ')');
+    var memberData = {
+      nikKK: nikCari, noKK: noKK, nikAnggota: parsed.nik,
+      nama: namaAnggota, hubunganKeluarga: parsed.hubungan,
+      pekerjaanUtama: parsed.pekerjaan, statusAktif: parsed.status
+    };
+    return tryUnmaskNikInCard(card).then(function (nikLengkap) {
+      if (nikLengkap) memberData.nikAnggota = nikLengkap;
+      else log('NIK lengkap belum didapat dari kartu, lanjut dengan NIK termasking');
+      return expandAnggotaCard(idx, memberData, namaAnggota);
     }).then(function () {
-      return extractDapodikFromCollapse(idx, memberData, namaAnggota);
-    }).then(function () {
-      var r = anggotaRowAt(idx);
-      var icon = r ? findExpandControlInRow(r) : null;
-      if (icon) clickEl(icon);
-      return delay(500);
-    });
-  }
-
-  // v1.5: catat struktur baris anggota ke log bila expand gagal.
-  function logAnggotaDiagnostics(idx, row) {
-    try {
-      var m = mainDialog();
-      var rows = m ? m.querySelectorAll('table tbody tr') : [];
-      log('DIAG anggota: ' + rows.length + ' baris di modal; baris ' + (idx + 1) + ': "' +
-        (row ? (row.innerText || '').replace(/\s+/g, ' ').slice(0, 120) : '(tidak ada)') + '"');
-      if (row) {
-        var r = row.getBoundingClientRect();
-        log('DIAG anggota: baris di layar top=' + Math.round(r.top) + ' bottom=' + Math.round(r.bottom) +
-          ' (tinggi layar ' + window.innerHeight + '); svg di baris: ' +
-          row.querySelectorAll('svg[data-testid]').length + '; button di baris: ' +
-          row.querySelectorAll('button').length + '; ExpandMoreIcon: ' +
-          row.querySelectorAll('svg[data-testid="ExpandMoreIcon"]').length);
-      }
-      var namaCount = 0;
-      if (m) {
-        var all = m.querySelectorAll('*');
-        for (var i = 0; i < all.length; i++) {
-          if ((all[i].innerText || '') === 'Nama Lengkap') namaCount++;
-        }
-      }
-      log('DIAG anggota: label "Nama Lengkap" di modal: ' + namaCount);
-    } catch (e) { log('DIAG anggota gagal: ' + e.message); }
-  }
-
-  function processAnggotaRow(idx, nikCari, noKK, members) {
-    var row = anggotaRowAt(idx);
-    if (!row) return Promise.resolve();
-    return Promise.resolve().then(function () {
-      var r = anggotaRowAt(idx);
-      if (!r) return null;
-      var firstCell = r.querySelector('td.MuiTableCell-body');
-      var cellText = firstCell ? (firstCell.innerText || '') : '';
-      var lines = cellText.split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return l; });
-      var namaAnggota = '', nikTermasking = '', hubungan = '', pekerjaan = '', status = '';
-      for (var j = 0; j < lines.length; j++) {
-        if (lines[j] === 'Nama Lengkap' && j + 1 < lines.length) namaAnggota = lines[j + 1];
-        if (lines[j] === 'NIK' && j + 1 < lines.length) nikTermasking = lines[j + 1];
-        if (lines[j] === 'Hubungan' && j + 1 < lines.length) hubungan = lines[j + 1];
-        if (lines[j] === 'Pekerjaan Utama' && j + 1 < lines.length) pekerjaan = lines[j + 1];
-        if (lines[j] === 'Status' && j + 1 < lines.length) status = lines[j + 1];
-      }
-      log('Anggota ' + (idx + 1) + ': ' + namaAnggota + ' (' + hubungan + ')');
-      var memberData = {
-        nikKK: nikCari, noKK: noKK, nikAnggota: nikTermasking,
-        nama: namaAnggota, hubunganKeluarga: hubungan,
-        pekerjaanUtama: pekerjaan, statusAktif: status
-      };
-      return tryUnmaskNik(idx).then(function (nikLengkap) {
-        if (nikLengkap) memberData.nikAnggota = nikLengkap;
-        else log('NIK lengkap belum didapat dari row, akan coba di collapse area');
-        return expandAnggotaRow(idx, memberData, namaAnggota);
-      }).then(function () {
-        members.push(memberData);
-      });
+      members.push(memberData);
     }).catch(function (e) {
-      log('Error parsing row ' + idx + ': ' + e.message);
+      log('Error parsing kartu ' + idx + ': ' + e.message);
     });
   }
 
@@ -1939,29 +1904,26 @@
     log('Scrolling ke section Daftar Anggota Keluarga...');
     var sc = modal.querySelector('.MuiDialogContent-root');
     if (sc) { try { sc.scrollTop = 600; } catch (e) {} }
-    // v1.5: di HP tabel bisa me-render lambat — tunggu baris muncul
-    // sampai 5 dtk, jangan hitung sekali jalan sesudah 500ms.
+    // v1.6: anggota berupa KARTU (bukan baris tabel) — tunggu kartu muncul
+    // sampai 8 dtk (data anggota dimuat async sesudah modal terbuka).
     return waitForFn(function () {
-      var m2 = mainDialog();
-      if (!m2) return null;
-      var n = m2.querySelectorAll('table tbody tr').length;
-      return n > 0 ? n : null;
-    }, 5000).then(function (rowCount) {
+      var cards = findAnggotaCards();
+      return cards.length > 0 ? cards.length : null;
+    }, 8000).then(function (cardCount) {
       var m = mainDialog();
       if (!m) return members;
-      if (!rowCount) {
-        rowCount = m.querySelectorAll('table tbody tr').length;
-        log('Ditemukan ' + rowCount + ' anggota keluarga');
+      if (!cardCount) {
+        log('Ditemukan 0 kartu anggota keluarga');
         logAnggotaDiagnostics(0, null);
         return members;
       }
-      log('Ditemukan ' + rowCount + ' anggota keluarga');
+      log('Ditemukan ' + cardCount + ' anggota keluarga');
       var chain = Promise.resolve();
-      for (var i = 0; i < rowCount; i++) {
+      for (var i = 0; i < cardCount; i++) {
         (function (idx) {
           chain = chain.then(function () {
             if (stopRequestedNow()) return;
-            return processAnggotaRow(idx, nikCari, noKK, members);
+            return processAnggotaCard(idx, nikCari, noKK, members);
           });
         })(i);
       }
@@ -2446,6 +2408,6 @@
   if (!cfg0.endpoint || !cfg0.apiKey) {
     log('Config AI (endpoint/API key) belum diisi — CAPTCHA dijawab manual lewat panel. Isi config lalu Simpan config bila ingin pakai AI.');
   }
-  log('DTSEN Scraper v1.5 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
+  log('DTSEN Scraper v1.6 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
   if (window.console && console.log) console.log('[DTSEN] userscript dimuat — panel di kanan bawah.');
 })();
