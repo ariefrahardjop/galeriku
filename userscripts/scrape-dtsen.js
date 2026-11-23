@@ -78,6 +78,16 @@
 //   tidak ditemukan" dan TIDAK ditandai processed (dicoba lagi di run
 //   berikutnya); hanya pesan "Data tidak ditemukan" yang eksplisit dari
 //   halaman yang dicatat begitu.
+// - v1.5: anggota keluarga belum terklik di HP — expand row kini
+//   scroll dulu (jendela) sampai baris terlihat + jeda + cari ulang
+//   FRESH (pelajaran v1.4); kontrol expand dicari dengan fallback:
+//   ExpandMoreIcon, button pembungkusnya, svg Expand/Chevron apa pun,
+//   button yang aria-label-nya mengandung "expand"/"detail"; bila tidak
+//   ada, barisnya sendiri diklik (baris/kartu di HP sering bisa diketuk
+//   untuk expand). Bila collapse tetap tidak terbuka, struktur baris
+//   dicatat ke log (DIAG anggota). extractDataAnggotaKeluarga kini
+//   menunggu baris muncul sampai 5 dtk (render HP lambat), bukan hitung
+//   sekali jalan sesudah 500ms.
 // - Modal + NIK termasking mengikuti pelajaran v1.37b/c/d dari userscript
 //   SIKS: baris diambil FRESH dari DOM per indeks (React me-render ulang
 //   sesudah klik); hover + klik ATOMIK dalam satu blok sinkron tanpa jeda;
@@ -1767,36 +1777,124 @@
     }).catch(function (e) { log('Error data pendidikan: ' + e.message); });
   }
 
+  // v1.5: cari kontrol expand di baris anggota — beberapa fallback,
+  // karena di HP ikon ExpandMore bisa disembunyikan (display:none) dan
+  // baris/kartu sendiri yang bisa diketuk untuk expand.
+  function findExpandControlInRow(row) {
+    var svg = row.querySelector('svg[data-testid="ExpandMoreIcon"]');
+    if (svg && isVisible(svg)) return svg;
+    var wrap = row.querySelector('button svg[data-testid="ExpandMoreIcon"]');
+    if (wrap && isVisible(wrap)) return wrap.closest('button') || wrap;
+    var svgs = row.querySelectorAll('svg[data-testid]');
+    for (var i = 0; i < svgs.length; i++) {
+      var tid = (svgs[i].getAttribute('data-testid') || '').toLowerCase();
+      if ((tid.indexOf('expand') !== -1 || tid.indexOf('chevron') !== -1) && isVisible(svgs[i])) return svgs[i];
+    }
+    var btns = row.querySelectorAll('button');
+    for (var j = 0; j < btns.length; j++) {
+      var al = (btns[j].getAttribute('aria-label') || '').toLowerCase();
+      if ((al.indexOf('expand') !== -1 || al.indexOf('detail') !== -1) && isVisible(btns[j])) return btns[j];
+    }
+    return null;
+  }
+
   function expandAnggotaRow(idx, memberData, namaAnggota) {
     var row = anggotaRowAt(idx);
     if (!row) return Promise.resolve();
-    var expandIcon = row.querySelector('svg[data-testid="ExpandMoreIcon"]');
-    if (!expandIcon || !isVisible(expandIcon)) {
-      log('Row tidak memiliki expand icon');
-      return Promise.resolve();
-    }
-    log('Expand row untuk ' + namaAnggota + '...');
-    scrollRowIntoViewIfNeeded(row);
-    clickEl(expandIcon);
-    return delay(800).then(function () {
-      return waitForFn(function () {
-        var c = collapseInRow(idx);
-        return (c && isVisible(c)) ? c : null;
-      }, 3000);
-    }).then(function (collapse) {
-      if (!collapse) { log('Collapse tidak terbuka'); return; }
-      log('Collapse area terbuka');
-      return unmaskNikInCollapse(idx, memberData).then(function () {
-        return extractDetailFromCollapse(idx, memberData, namaAnggota);
-      }).then(function () {
-        return extractDapodikFromCollapse(idx, memberData, namaAnggota);
-      }).then(function () {
-        var r = anggotaRowAt(idx);
-        var icon = r ? r.querySelector('svg[data-testid="ExpandMoreIcon"]') : null;
-        if (icon && isVisible(icon)) clickEl(icon);
-        return delay(500);
+    // v1.5: scroll dulu (jendela) sampai baris terlihat, jeda, lalu cari
+    // ulang barisnya FRESH — pelajaran v1.4 di tombol detail.
+    try {
+      var rr = row.getBoundingClientRect();
+      if (rr.top < 0 || rr.bottom > window.innerHeight) {
+        row.scrollIntoView({ block: 'center', behavior: 'instant' });
+      }
+    } catch (e) {}
+    return delay(600).then(function () {
+      var row2 = anggotaRowAt(idx);
+      if (!row2) return;
+      var expandIcon = findExpandControlInRow(row2);
+      if (!expandIcon) {
+        log('Row tidak memiliki expand icon — mencoba klik barisnya langsung...');
+        logAnggotaDiagnostics(idx, row2);
+        clickEl(row2);
+        return delay(800).then(function () {
+          return waitForFn(function () {
+            var c = collapseInRow(idx);
+            return (c && isVisible(c)) ? c : null;
+          }, 3000);
+        }).then(function (collapse) {
+          if (!collapse) { log('Collapse tidak terbuka sesudah klik baris'); return; }
+          log('Collapse area terbuka (klik baris)');
+          return expandCollapseContent(idx, memberData, namaAnggota);
+        });
+      }
+      log('Expand row untuk ' + namaAnggota + '...');
+      clickEl(expandIcon);
+      return delay(800).then(function () {
+        return waitForFn(function () {
+          var c = collapseInRow(idx);
+          return (c && isVisible(c)) ? c : null;
+        }, 3000);
+      }).then(function (collapse) {
+        if (!collapse) {
+          log('Collapse tidak terbuka — mencoba klik barisnya langsung...');
+          logAnggotaDiagnostics(idx, row2);
+          clickEl(row2);
+          return delay(800).then(function () {
+            return waitForFn(function () {
+              var c2 = collapseInRow(idx);
+              return (c2 && isVisible(c2)) ? c2 : null;
+            }, 3000);
+          }).then(function (collapse2) {
+            if (!collapse2) { log('Collapse tetap tidak terbuka'); return; }
+            log('Collapse area terbuka (klik baris)');
+            return expandCollapseContent(idx, memberData, namaAnggota);
+          });
+        }
+        log('Collapse area terbuka');
+        return expandCollapseContent(idx, memberData, namaAnggota);
       });
     });
+  }
+
+  // Isi collapse yang terbuka: unmask NIK + detail + Dapodik, lalu tutup.
+  function expandCollapseContent(idx, memberData, namaAnggota) {
+    return unmaskNikInCollapse(idx, memberData).then(function () {
+      return extractDetailFromCollapse(idx, memberData, namaAnggota);
+    }).then(function () {
+      return extractDapodikFromCollapse(idx, memberData, namaAnggota);
+    }).then(function () {
+      var r = anggotaRowAt(idx);
+      var icon = r ? findExpandControlInRow(r) : null;
+      if (icon) clickEl(icon);
+      return delay(500);
+    });
+  }
+
+  // v1.5: catat struktur baris anggota ke log bila expand gagal.
+  function logAnggotaDiagnostics(idx, row) {
+    try {
+      var m = mainDialog();
+      var rows = m ? m.querySelectorAll('table tbody tr') : [];
+      log('DIAG anggota: ' + rows.length + ' baris di modal; baris ' + (idx + 1) + ': "' +
+        (row ? (row.innerText || '').replace(/\s+/g, ' ').slice(0, 120) : '(tidak ada)') + '"');
+      if (row) {
+        var r = row.getBoundingClientRect();
+        log('DIAG anggota: baris di layar top=' + Math.round(r.top) + ' bottom=' + Math.round(r.bottom) +
+          ' (tinggi layar ' + window.innerHeight + '); svg di baris: ' +
+          row.querySelectorAll('svg[data-testid]').length + '; button di baris: ' +
+          row.querySelectorAll('button').length + '; ExpandMoreIcon: ' +
+          row.querySelectorAll('svg[data-testid="ExpandMoreIcon"]').length);
+      }
+      var namaCount = 0;
+      if (m) {
+        var all = m.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+          if ((all[i].innerText || '') === 'Nama Lengkap') namaCount++;
+        }
+      }
+      log('DIAG anggota: label "Nama Lengkap" di modal: ' + namaCount);
+    } catch (e) { log('DIAG anggota gagal: ' + e.message); }
   }
 
   function processAnggotaRow(idx, nikCari, noKK, members) {
@@ -1841,10 +1939,22 @@
     log('Scrolling ke section Daftar Anggota Keluarga...');
     var sc = modal.querySelector('.MuiDialogContent-root');
     if (sc) { try { sc.scrollTop = 600; } catch (e) {} }
-    return delay(500).then(function () {
+    // v1.5: di HP tabel bisa me-render lambat — tunggu baris muncul
+    // sampai 5 dtk, jangan hitung sekali jalan sesudah 500ms.
+    return waitForFn(function () {
+      var m2 = mainDialog();
+      if (!m2) return null;
+      var n = m2.querySelectorAll('table tbody tr').length;
+      return n > 0 ? n : null;
+    }, 5000).then(function (rowCount) {
       var m = mainDialog();
       if (!m) return members;
-      var rowCount = m.querySelectorAll('table tbody tr').length;
+      if (!rowCount) {
+        rowCount = m.querySelectorAll('table tbody tr').length;
+        log('Ditemukan ' + rowCount + ' anggota keluarga');
+        logAnggotaDiagnostics(0, null);
+        return members;
+      }
       log('Ditemukan ' + rowCount + ' anggota keluarga');
       var chain = Promise.resolve();
       for (var i = 0; i < rowCount; i++) {
@@ -2336,6 +2446,6 @@
   if (!cfg0.endpoint || !cfg0.apiKey) {
     log('Config AI (endpoint/API key) belum diisi — CAPTCHA dijawab manual lewat panel. Isi config lalu Simpan config bila ingin pakai AI.');
   }
-  log('DTSEN Scraper v1.4 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
+  log('DTSEN Scraper v1.5 dimuat. Isi daftar NIK (Impor CSV / tempel teks), lalu tekan Mulai.');
   if (window.console && console.log) console.log('[DTSEN] userscript dimuat — panel di kanan bawah.');
 })();
